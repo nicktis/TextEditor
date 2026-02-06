@@ -5,6 +5,23 @@ import * as iconv from 'iconv-lite';
 
 let mainWindow: BrowserWindow | null = null;
 
+const formatMappingsPath = path.join(app.getPath('userData'), 'format-mappings.json');
+
+function loadFormatMappings(): { [key: string]: string } {
+  try {
+    if (fs.existsSync(formatMappingsPath)) {
+      return JSON.parse(fs.readFileSync(formatMappingsPath, 'utf-8'));
+    }
+  } catch {
+    // ignore corrupt config
+  }
+  return {};
+}
+
+function saveFormatMappings(mappings: { [key: string]: string }): void {
+  fs.writeFileSync(formatMappingsPath, JSON.stringify(mappings, null, 2), 'utf-8');
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -248,6 +265,19 @@ ipcMain.handle('reload-file', async (_, data: { filePath: string }) => {
     return fileData;
   } catch (error) {
     return null;
+  }
+});
+
+ipcMain.handle('load-format-mappings', async () => {
+  return loadFormatMappings();
+});
+
+ipcMain.handle('save-format-mappings', async (_, mappings: { [key: string]: string }) => {
+  try {
+    saveFormatMappings(mappings);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
   }
 });
 

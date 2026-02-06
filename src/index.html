@@ -240,6 +240,35 @@
       border: none;
     }
 
+    .format-modal-field {
+      margin-bottom: 16px;
+    }
+
+    .format-modal-field select {
+      width: 100%;
+      padding: 8px;
+      background-color: #3c3c3c;
+      color: #d4d4d4;
+      border: 1px solid #505050;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+
+    .format-modal-field label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #d4d4d4;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .format-modal-field input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+    }
+
     .hidden {
       display: none !important;
     }
@@ -322,6 +351,16 @@
       color: #333333;
       border-color: #cccccc;
     }
+
+    body.light-theme .format-modal-field select {
+      background-color: #ffffff;
+      color: #333333;
+      border-color: #cccccc;
+    }
+
+    body.light-theme .format-modal-field label {
+      color: #333333;
+    }
   </style>
 </head>
 <body>
@@ -378,8 +417,33 @@
     </div>
   </div>
 
+  <!-- Format selection modal -->
+  <div id="format-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Select Format Type</h3>
+      <p id="format-modal-message">Choose a format type for this file:</p>
+      <div class="format-modal-field">
+        <select id="format-type-select">
+          <option value="json">JSON</option>
+          <option value="xml">XML</option>
+          <option value="html">HTML</option>
+        </select>
+      </div>
+      <div class="format-modal-field">
+        <label id="format-remember-label">
+          <input type="checkbox" id="format-remember-checkbox">
+          <span id="format-remember-text">Always use this format for this extension</span>
+        </label>
+      </div>
+      <div class="modal-buttons">
+        <button class="btn-secondary" id="format-modal-cancel">Cancel</button>
+        <button class="btn-primary" id="format-modal-apply">Format</button>
+      </div>
+    </div>
+  </div>
+
   <script>
-    const { ipcRenderer } = require('electron');
+    const { ipcRenderer, webUtils } = require('electron');
     const path = require('path');
     const CodeMirror = require('codemirror');
 
@@ -401,6 +465,7 @@
     let pendingCloseAction = null; // { type: 'close' | 'closeAll', fileId }
     let isLoadingContent = false; // Flag to suppress dirty marking during programmatic content changes
     let isDarkTheme = true; // Theme state
+    let formatMappings = {}; // Extension-to-format mappings (e.g. { ".csproj": "xml" })
 
     // Initialize CodeMirror
     const editor = CodeMirror.fromTextArea(document.getElementById('editor'), {
@@ -462,6 +527,32 @@
         await saveFileById(fileId);
         forceCloseFile(fileId);
       }
+    });
+
+    // Format modal buttons
+    document.getElementById('format-modal-cancel').addEventListener('click', () => {
+      document.getElementById('format-modal').classList.add('hidden');
+    });
+    document.getElementById('format-modal-apply').addEventListener('click', async () => {
+      const formatType = document.getElementById('format-type-select').value;
+      const remember = document.getElementById('format-remember-checkbox').checked;
+      document.getElementById('format-modal').classList.add('hidden');
+
+      const file = getActiveFile();
+      if (!file) return;
+
+      if (remember && file.filePath) {
+        const ext = path.extname(file.filePath).toLowerCase();
+        formatMappings[ext] = formatType;
+        await ipcRenderer.invoke('save-format-mappings', formatMappings);
+      }
+
+      applyFormat(formatType);
+    });
+
+    // Load saved format mappings on startup
+    ipcRenderer.invoke('load-format-mappings').then(mappings => {
+      formatMappings = mappings || {};
     });
 
     // IPC listeners
@@ -732,6 +823,81 @@
       }
     }
 
+    function getFormatType(file) {
+      const supportedFormats = ['json', 'xml', 'html'];
+      if (supportedFormats.includes(file.language)) {
+        return file.language;
+      }
+      if (file.filePath) {
+        const ext = path.extname(file.filePath).toLowerCase();
+        if (formatMappings[ext]) {
+          return formatMappings[ext];
+        }
+      }
+      return null;
+    }
+
+    function applyFormat(formatType) {
+      const file = getActiveFile();
+      if (!file) return;
+
+      // Apply syntax highlighting for the selected format type
+      file.language = formatType;
+      editor.setOption('mode', getCodeMirrorMode(formatType));
+      updateLanguage(getLanguageDisplayName(formatType));
+
+      const content = editor.getValue();
+      let formatted;
+
+      try {
+        if (formatType === 'json') {
+          formatted = formatJSON(content);
+        } else if (formatType === 'xml') {
+          formatted = formatXML(content);
+        } else if (formatType === 'html') {
+          formatted = formatHTML(content);
+        } else {
+          updateStatus('Unknown format type: ' + formatType);
+          return;
+        }
+
+        if (formatted !== null && formatted !== content) {
+          isLoadingContent = true;
+          editor.setValue(formatted);
+          isLoadingContent = false;
+          file.isDirty = true;
+          updateFilesList();
+          updateTitle();
+          updateStatus('Document formatted as ' + formatType.toUpperCase());
+        } else {
+          updateStatus('Document highlighted as ' + formatType.toUpperCase());
+        }
+      } catch (err) {
+        updateStatus('Format error: ' + err.message);
+      }
+    }
+
+    function showFormatModal(file) {
+      const ext = file.filePath ? path.extname(file.filePath).toLowerCase() : '';
+      const msg = ext
+        ? 'Choose a format type for ' + ext + ' files:'
+        : 'Choose a format type:';
+      document.getElementById('format-modal-message').textContent = msg;
+
+      const rememberLabel = document.getElementById('format-remember-label');
+      if (ext) {
+        rememberLabel.classList.remove('hidden');
+        document.getElementById('format-remember-text').textContent =
+          'Always use this format for ' + ext + ' files';
+      } else {
+        rememberLabel.classList.add('hidden');
+      }
+
+      document.getElementById('format-remember-checkbox').checked = false;
+      document.getElementById('format-type-select').value = 'xml';
+      document.getElementById('format-modal').classList.remove('hidden');
+    }
+
     function formatDocument() {
       const file = getActiveFile();
       if (!file) {
@@ -739,33 +905,11 @@
         return;
       }
 
-      const content = editor.getValue();
-      const language = file.language;
-      let formatted;
-
-      try {
-        if (language === 'json') {
-          formatted = formatJSON(content);
-        } else if (language === 'xml') {
-          formatted = formatXML(content);
-        } else if (language === 'html') {
-          formatted = formatHTML(content);
-        } else {
-          updateStatus('Format not supported for this file type');
-          return;
-        }
-
-        if (formatted !== null) {
-          isLoadingContent = true;
-          editor.setValue(formatted);
-          isLoadingContent = false;
-          file.isDirty = true;
-          updateFilesList();
-          updateTitle();
-          updateStatus('Document formatted');
-        }
-      } catch (err) {
-        updateStatus('Format error: ' + err.message);
+      const formatType = getFormatType(file);
+      if (formatType) {
+        applyFormat(formatType);
+      } else {
+        showFormatModal(file);
       }
     }
 
@@ -997,6 +1141,22 @@
       };
       return map[ext] || 'plaintext';
     }
+
+    // Drag and drop file opening (capture phase to intercept before CodeMirror)
+    document.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    }, true);
+    document.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const file = e.dataTransfer.files[0];
+      if (!file) return;
+      const filePath = webUtils.getPathForFile(file);
+      if (!filePath) return;
+      const data = await ipcRenderer.invoke('reload-file', { filePath });
+      if (data) loadFile(data);
+    }, true);
 
     // Initialize - show no file message
     document.getElementById('editor-container').classList.add('hidden');
